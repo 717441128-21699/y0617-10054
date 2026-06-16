@@ -14,6 +14,26 @@ router.get('/stats/overview', (req: Request, res: Response) => {
   res.json({ data: overview });
 });
 
+router.get('/stats/analysis', (req: Request, res: Response) => {
+  const promotionType = req.query.promotionType as any || undefined;
+  const categoryId = req.query.categoryId as string || undefined;
+  const operatorId = req.query.operatorId as string || undefined;
+  const startTime = req.query.startTime ? Number(req.query.startTime) : undefined;
+  const endTime = req.query.endTime ? Number(req.query.endTime) : undefined;
+  const status = req.query.status ? (req.query.status as string).split(',') as any : undefined;
+
+  const analysis = promotionService.getEffectAnalysis({
+    promotionType,
+    categoryId,
+    operatorId,
+    startTime,
+    endTime,
+    status
+  });
+
+  res.json({ data: analysis });
+});
+
 router.get('/stats/all', (req: Request, res: Response) => {
   const startTime = req.query.startTime ? Number(req.query.startTime) : undefined;
   const endTime = req.query.endTime ? Number(req.query.endTime) : undefined;
@@ -42,6 +62,40 @@ router.get('/stats/export', (req: Request, res: Response) => {
     res.json({
       data: exportData.data,
       filename: exportData.filename
+    });
+  }
+});
+
+router.get('/stats/export-filtered', (req: Request, res: Response) => {
+  const promotionType = req.query.promotionType as any || undefined;
+  const categoryId = req.query.categoryId as string || undefined;
+  const operatorId = req.query.operatorId as string || undefined;
+  const startTime = req.query.startTime ? Number(req.query.startTime) : undefined;
+  const endTime = req.query.endTime ? Number(req.query.endTime) : undefined;
+  const status = req.query.status ? (req.query.status as string).split(',') as any : undefined;
+  const format = (req.query.format as 'json' | 'csv') || 'json';
+
+  const exportData = promotionService.exportStatsByFilter(
+    {
+      promotionType,
+      categoryId,
+      operatorId,
+      startTime,
+      endTime,
+      status
+    },
+    format
+  );
+
+  if (format === 'csv') {
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${exportData.filename}"`);
+    res.send(exportData.data);
+  } else {
+    res.json({
+      data: (exportData as any).data,
+      filename: exportData.filename,
+      summary: (exportData as any).summary
     });
   }
 });
@@ -128,6 +182,16 @@ router.post('/:id/submit-approval', (req: Request, res: Response) => {
     return;
   }
   res.json({ data: updated });
+});
+
+router.post('/:id/submit-approval-with-check', (req: Request, res: Response) => {
+  const { operatorId } = req.body;
+  const result = promotionService.submitForApprovalWithCheck(req.params.id, operatorId);
+  if (!result.promotion && !result.success) {
+    res.status(404).json({ error: '活动不存在' });
+    return;
+  }
+  res.json({ data: result });
 });
 
 router.post('/:id/approve', (req: Request, res: Response) => {

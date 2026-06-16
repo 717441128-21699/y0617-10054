@@ -14,7 +14,11 @@ import {
   ScenarioPreviewResult,
   BatchPreviewCartItem,
   AppliedPromotion,
-  GiftItem
+  GiftItem,
+  DashboardFilter,
+  PromotionEffectAnalysis,
+  SubmitApprovalResult,
+  ConflictDetectionResult
 } from '../types';
 import { dataStore } from '../store/dataStore';
 import { promotionEngine } from '../engine/promotionEngine';
@@ -160,6 +164,45 @@ export class PromotionService {
 
   submitForApproval(promotionId: string, operatorId?: string): Promotion | undefined {
     return dataStore.submitForApproval(promotionId, { operatorId });
+  }
+
+  submitForApprovalWithCheck(promotionId: string, operatorId?: string): SubmitApprovalResult {
+    const promotion = dataStore.getPromotion(promotionId);
+    if (!promotion) {
+      return {
+        success: false,
+        warnings: ['活动不存在']
+      };
+    }
+
+    const conflictResult = conflictDetectionService.detectConflicts(
+      promotion as any,
+      promotionId
+    );
+
+    const hasBlockingConflicts = conflictResult.conflicts.some(c => c.level === 'error');
+
+    if (hasBlockingConflicts) {
+      return {
+        success: false,
+        promotion,
+        conflictResult,
+        hasBlockingConflicts: true,
+        warnings: ['存在严重冲突，无法提交审批，请先调整活动配置']
+      };
+    }
+
+    const updatedPromotion = dataStore.submitForApproval(promotionId, { operatorId });
+
+    return {
+      success: true,
+      promotion: updatedPromotion,
+      conflictResult,
+      hasBlockingConflicts: false,
+      warnings: conflictResult.conflicts.length > 0
+        ? ['存在警告级冲突，已提交审批，请注意审核']
+        : []
+    };
   }
 
   approvePromotion(
@@ -352,7 +395,8 @@ export class PromotionService {
       cartItems: BatchPreviewCartItem[];
       userTags?: string[];
     }>,
-    promotionToTest?: Partial<Promotion> & { config: PromotionConfig; scope: PromotionScope }
+    promotionToTest?: Partial<Promotion> & { config: PromotionConfig; scope: PromotionScope },
+    includeExistingPromotions: boolean = true
   ): ScenarioPreviewResult[] {
     const results: ScenarioPreviewResult[] = [];
 
@@ -360,7 +404,9 @@ export class PromotionService {
       const cartItems = productService.buildCartItems(scenario.cartItems);
       let calcResult: CalculationResult;
 
-      if (promotionToTest) {
+      if (promotionToTest && !includeExistingPromotions) {
+        calcResult = this.previewPromotion(promotionToTest, scenario.cartItems);
+      } else if (promotionToTest && includeExistingPromotions) {
         calcResult = this.previewPromotion(promotionToTest, scenario.cartItems);
       } else {
         calcResult = promotionEngine.calculate(cartItems);
@@ -407,6 +453,8 @@ export class PromotionService {
         });
       }
 
+      const tagImpact = this.analyzeTagImpact(scenario.userTags, calcResult);
+
       results.push({
         scenarioId: scenario.scenarioId,
         scenarioName: scenario.scenarioName,
@@ -415,11 +463,54 @@ export class PromotionService {
         totalDiscount: calcResult.totalDiscount,
         appliedPromotions: calcResult.appliedPromotions,
         skippedPromotions,
-        giftItems: calcResult.giftItems
+        giftItems: calcResult.giftItems,
+        userTags: scenario.userTags,
+        tagImpact
       });
     }
 
     return results;
+  }
+
+  private analyzeTagImpact(
+    userTags: string[] | undefined,
+    calcResult: CalculationResult
+  ): { matchedTags: string[]; unmatchedTags: string[]; description: string } | undefined {
+    if (!userTags || userTags.length === 0) return undefined;
+
+    const matchedTags: string[] = [];
+    const unmatchedTags: string[] = [...userTags];
+
+    calcResult.appliedPromotions.forEach(promo => {
+      userTags.forEach(tag => {
+        const promoName = promo.promotionName.toLowerCase();
+        const tagLower = tag.toLowerCase();
+        if (promoName.includes(tagLower) || promo.description.toLowerCase().includes(tagLower)) {
+          if (!matchedTags.includes(tag)) {
+            matchedTags.push(tag);
+          }
+          const idx = unmatchedTags.indexOf(tag);
+          if (idx > -1) {
+            unmatchedTags.splice(idx, 1);
+          }
+        }
+      });
+    });
+
+    let description = '';
+    if (matchedTags.length > 0 && unmatchedTags.length > 0) {
+      description = `用户标签「${matchedTags.join('、')}」匹配了${matchedTags.length}个活动，标签「${unmatchedTags.join('、')}」未匹配到对应活动`;
+    } else if (matchedTags.length > 0) {
+      description = `用户标签「${matchedTags.join('、')}」匹配了${matchedTags.length}个活动`;
+    } else {
+      description = `传入的${userTags.length}个用户标签均未匹配到专属活动，命中的活动均为公开活动`;
+    }
+
+    return {
+      matchedTags,
+      unmatchedTags,
+      description
+    };
   }
 
   getPromotion(id: string): Promotion | undefined {
@@ -509,6 +600,7 @@ export class PromotionService {
     let totalDiscount = 0;
     let flashSaleTotalStock = 0;
     let flashSaleSoldStock = 0;
+    let flashSaleLockedStock = 0;
 
     const promotionStats: any[] = [];
 
@@ -529,6 +621,7 @@ export class PromotionService {
         if (stock) {
           flashSaleTotalStock += stock.totalStock;
           flashSaleSoldStock += stock.soldStock;
+          flashSaleLockedStock += stock.lockedStock;
         }
       }
     }
@@ -541,8 +634,94 @@ export class PromotionService {
       totalDiscount,
       flashSaleTotalStock,
       flashSaleSoldStock,
-      flashSaleRemainingStock: flashSaleTotalStock - flashSaleSoldStock,
+      flashSaleRemainingStock: flashSaleTotalStock - flashSaleSoldStock - flashSaleLockedStock,
       promotionStats
+    };
+  }
+
+  getEffectAnalysis(filter: DashboardFilter): PromotionEffectAnalysis {
+    const analysis = dataStore.getEffectAnalysis(filter);
+
+    const promotionStatsWithDetails = analysis.promotionStats.map(stat => {
+      const promotion = dataStore.getPromotion(stat.promotionId);
+      const result: any = { ...stat };
+      if (promotion) {
+        result.promotionName = promotion.name;
+        result.promotionType = promotion.type;
+        result.operatorId = promotion.operatorId;
+
+        if (promotion.type === PromotionType.FLASH_SALE) {
+          const stock = dataStore.getFlashSaleStock(promotion.id);
+          if (stock) {
+            result.flashSaleTotalStock = stock.totalStock;
+            result.flashSaleRemainingStock = stock.totalStock - stock.soldStock - stock.lockedStock;
+            result.flashSaleLockedStock = stock.lockedStock;
+          }
+        }
+      }
+      return result;
+    });
+
+    return {
+      ...analysis,
+      promotionStats: promotionStatsWithDetails
+    };
+  }
+
+  exportStatsByFilter(
+    filter: DashboardFilter,
+    format: 'json' | 'csv' = 'json'
+  ) {
+    const analysis = this.getEffectAnalysis(filter);
+    const stats = analysis.promotionStats;
+
+    if (format === 'csv') {
+      const headers = ['活动ID', '活动名称', '活动类型', '运营人', '订单数', '成交金额', '优惠金额', '秒杀已售', '秒杀剩余', '秒杀锁定'];
+      const rows = stats.map((s: any) => [
+        s.promotionId,
+        s.promotionName || '',
+        s.promotionType || '',
+        s.operatorId || '',
+        s.orderCount,
+        s.totalSales,
+        s.totalDiscount,
+        s.flashSaleSold || 0,
+        s.flashSaleRemainingStock || 0,
+        s.flashSaleLockedStock || 0
+      ]);
+
+      const csv = [
+        headers.join(','),
+        ...rows.map(row => row.join(','))
+      ].join('\n');
+
+      return {
+        format: 'csv',
+        filename: `promotion_stats_filtered_${Date.now()}.csv`,
+        data: csv,
+        summary: {
+          totalOrders: analysis.totalOrders,
+          totalSales: analysis.totalSales,
+          totalDiscount: analysis.totalDiscount,
+          promotionCount: analysis.promotionCount
+        }
+      };
+    }
+
+    return {
+      format: 'json',
+      filename: `promotion_stats_filtered_${Date.now()}.json`,
+      data: {
+        summary: {
+          totalOrders: analysis.totalOrders,
+          totalSales: analysis.totalSales,
+          totalDiscount: analysis.totalDiscount,
+          promotionCount: analysis.promotionCount,
+          flashSaleTotalStock: analysis.flashSaleTotalStock,
+          flashSaleRemainingStock: analysis.flashSaleRemainingStock
+        },
+        promotionStats: stats
+      }
     };
   }
 

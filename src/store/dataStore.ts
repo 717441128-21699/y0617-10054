@@ -7,7 +7,10 @@ import {
   SalesStats,
   PromotionStatus,
   PromotionVersion,
-  VersionChangeType
+  VersionChangeType,
+  VersionStatus,
+  DashboardFilter,
+  PromotionEffectAnalysis
 } from '../types';
 
 class DataStore {
@@ -50,7 +53,7 @@ class DataStore {
   }
 
   addPromotion(
-    promotion: Omit<Promotion, 'id' | 'createdAt' | 'updatedAt'>,
+    promotion: Omit<Promotion, 'id' | 'createdAt' | 'updatedAt' | 'activeVersion'>,
     options?: { operatorId?: string; changeDescription?: string }
   ): Promotion {
     const id = this.generateId();
@@ -59,7 +62,9 @@ class DataStore {
       ...promotion,
       id,
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      activeVersion: promotion.status === PromotionStatus.ACTIVE ? 1 : undefined,
+      operatorId: options?.operatorId
     };
     this.promotions.set(id, newPromotion);
 
@@ -74,12 +79,27 @@ class DataStore {
       });
     }
 
+    const versionStatus = this.getInitialVersionStatus(promotion.status);
     this.createVersion(id, newPromotion, VersionChangeType.CREATE, {
       operatorId: options?.operatorId,
-      changeDescription: options?.changeDescription || '创建活动'
+      changeDescription: options?.changeDescription || '创建活动',
+      versionStatus
     });
 
     return newPromotion;
+  }
+
+  private getInitialVersionStatus(status: PromotionStatus): VersionStatus {
+    switch (status) {
+      case PromotionStatus.ACTIVE:
+      case PromotionStatus.INACTIVE:
+        return VersionStatus.EFFECTIVE;
+      case PromotionStatus.PENDING_APPROVAL:
+        return VersionStatus.PENDING_APPROVAL;
+      case PromotionStatus.DRAFT:
+      default:
+        return VersionStatus.DRAFT;
+    }
   }
 
   getPromotion(id: string): Promotion | undefined {
@@ -105,15 +125,48 @@ class DataStore {
   ): Promotion | undefined {
     const promotion = this.promotions.get(id);
     if (!promotion) return undefined;
-    const updated = { ...promotion, ...updates, updatedAt: Date.now() };
-    this.promotions.set(id, updated);
 
-    this.createVersion(id, updated, VersionChangeType.UPDATE, {
-      operatorId: options?.operatorId,
-      changeDescription: options?.changeDescription || '更新活动'
-    });
+    const isActive = promotion.status === PromotionStatus.ACTIVE;
+    const now = Date.now();
 
-    return updated;
+    if (isActive) {
+      const newVersionNum = (this.versionCounters.get(id) || 0) + 1;
+      const draftPromotion: Promotion = {
+        ...promotion,
+        ...updates,
+        status: PromotionStatus.DRAFT,
+        updatedAt: now
+      };
+
+      this.promotions.set(id, draftPromotion);
+
+      this.createVersion(id, draftPromotion, VersionChangeType.UPDATE, {
+        operatorId: options?.operatorId,
+        changeDescription: options?.changeDescription || '编辑已上线活动，创建草稿版本',
+        versionStatus: VersionStatus.DRAFT,
+        parentVersion: promotion.activeVersion
+      });
+
+      return draftPromotion;
+    } else {
+      const updated = { ...promotion, ...updates, updatedAt: now };
+      this.promotions.set(id, updated);
+
+      const currentVersionNum = this.versionCounters.get(id) || 0;
+      const currentVersion = this.getVersion(id, currentVersionNum);
+      const versionStatus = currentVersion?.versionStatus === VersionStatus.EFFECTIVE
+        ? VersionStatus.EFFECTIVE
+        : VersionStatus.DRAFT;
+
+      this.createVersion(id, updated, VersionChangeType.UPDATE, {
+        operatorId: options?.operatorId,
+        changeDescription: options?.changeDescription || '更新活动',
+        versionStatus,
+        parentVersion: currentVersionNum
+      });
+
+      return updated;
+    }
   }
 
   deletePromotion(id: string): boolean {
@@ -211,14 +264,135 @@ class DataStore {
     return orders;
   }
 
+  getEffectAnalysis(filter: DashboardFilter): PromotionEffectAnalysis {
+    let promotions = this.getAllPromotions();
+
+    if (filter.promotionType) {
+      promotions = promotions.filter(p => p.type === filter.promotionType);
+    }
+
+    if (filter.operatorId) {
+      promotions = promotions.filter(p => p.operatorId === filter.operatorId);
+    }
+
+    if (filter.status && filter.status.length > 0) {
+      promotions = promotions.filter(p => filter.status!.includes(p.status));
+    }
+
+    if (filter.categoryId) {
+      promotions = promotions.filter(p => {
+        if (p.scope.type === 'all') return true;
+        if (p.scope.type === 'category') {
+          return p.scope.categoryIds?.includes(filter.categoryId!);
+        }
+        if (p.scope.type === 'product') {
+          return p.scope.productIds?.some(pid => {
+            const product = this.getProduct(pid);
+            return product?.categoryId === filter.categoryId;
+          });
+        }
+        return false;
+      });
+    }
+
+    const timeRange = {
+      startTime: filter.startTime,
+      endTime: filter.endTime
+    };
+
+    let totalOrders = 0;
+    let totalSales = 0;
+    let totalDiscount = 0;
+    let flashSaleTotalStock = 0;
+    let flashSaleRemainingStock = 0;
+    const promotionStats: SalesStats[] = [];
+
+    promotions.forEach(promo => {
+      const stats = this.getSalesStats(promo.id, timeRange);
+      promotionStats.push(stats);
+      totalOrders += stats.orderCount;
+      totalSales += stats.totalSales;
+      totalDiscount += stats.totalDiscount;
+
+      if (promo.type === 'flash_sale') {
+        const stock = this.getFlashSaleStock(promo.id);
+        if (stock) {
+          flashSaleTotalStock += stock.totalStock;
+          flashSaleRemainingStock += stock.totalStock - stock.soldStock - stock.lockedStock;
+        }
+      }
+    });
+
+    const trendData = this.buildTrendData(promotions, timeRange);
+
+    return {
+      totalOrders,
+      totalSales,
+      totalDiscount,
+      promotionCount: promotions.length,
+      flashSaleTotalStock: flashSaleTotalStock > 0 ? flashSaleTotalStock : undefined,
+      flashSaleRemainingStock: flashSaleTotalStock > 0 ? flashSaleRemainingStock : undefined,
+      promotionStats,
+      trendData
+    };
+  }
+
+  private buildTrendData(
+    promotions: Promotion[],
+    timeRange: { startTime?: number; endTime?: number }
+  ): Array<{ timestamp: number; orderCount: number; salesAmount: number; discountAmount: number }> {
+    const startTime = timeRange.startTime || Date.now() - 7 * 24 * 3600 * 1000;
+    const endTime = timeRange.endTime || Date.now();
+
+    const hourMs = 3600 * 1000;
+    const points: Array<{ timestamp: number; orderCount: number; salesAmount: number; discountAmount: number }> = [];
+
+    for (let t = startTime; t <= endTime; t += hourMs) {
+      points.push({
+        timestamp: t,
+        orderCount: 0,
+        salesAmount: 0,
+        discountAmount: 0
+      });
+    }
+
+    const promotionIds = new Set(promotions.map(p => p.id));
+
+    const orders = this.getAllOrders(timeRange);
+    orders.forEach(order => {
+      const hasTargetPromo = order.appliedPromotions.some(p => promotionIds.has(p.promotionId));
+      if (!hasTargetPromo) return;
+
+      const point = points.find(p => p.timestamp + hourMs > order.createdAt && p.timestamp <= order.createdAt);
+      if (point) {
+        point.orderCount++;
+        point.salesAmount += order.finalTotal;
+        order.appliedPromotions.forEach(p => {
+          if (promotionIds.has(p.promotionId)) {
+            point.discountAmount += p.discountAmount;
+          }
+        });
+      }
+    });
+
+    return points;
+  }
+
   private createVersion(
     promotionId: string,
     promotion: Promotion,
     changeType: VersionChangeType,
-    options?: { operatorId?: string; changeDescription?: string }
+    options?: {
+      operatorId?: string;
+      changeDescription?: string;
+      versionStatus?: VersionStatus;
+      parentVersion?: number;
+    }
   ): PromotionVersion {
     const versionNum = (this.versionCounters.get(promotionId) || 0) + 1;
     this.versionCounters.set(promotionId, versionNum);
+
+    const versionStatus = options?.versionStatus || VersionStatus.DRAFT;
 
     const version: PromotionVersion = {
       id: this.generateId(),
@@ -237,6 +411,8 @@ class DataStore {
       changeType,
       changeDescription: options?.changeDescription,
       operatorId: options?.operatorId,
+      versionStatus,
+      parentVersion: options?.parentVersion,
       createdAt: Date.now()
     };
 
@@ -258,29 +434,42 @@ class DataStore {
     return versions.find(v => v.version === versionNumber);
   }
 
+  getEffectiveVersion(promotionId: string): PromotionVersion | undefined {
+    const versions = this.versions.get(promotionId) || [];
+    return versions.find(v => v.versionStatus === VersionStatus.EFFECTIVE);
+  }
+
   rollbackToVersion(
     promotionId: string,
     versionNumber: number,
     options?: { operatorId?: string }
   ): Promotion | undefined {
-    const version = this.getVersion(promotionId, versionNumber);
-    if (!version) return undefined;
+    const targetVersion = this.getVersion(promotionId, versionNumber);
+    if (!targetVersion) return undefined;
 
     const promotion = this.promotions.get(promotionId);
     if (!promotion) return undefined;
 
+    const currentEffective = this.getEffectiveVersion(promotionId);
+    if (currentEffective) {
+      this.markVersionStatus(promotionId, currentEffective.version, VersionStatus.HISTORICAL);
+    }
+
+    this.markVersionStatus(promotionId, targetVersion.version, VersionStatus.EFFECTIVE);
+
     const rolledBack: Promotion = {
       ...promotion,
-      name: version.name,
-      description: version.description,
-      type: version.type,
-      config: JSON.parse(JSON.stringify(version.config)),
-      scope: JSON.parse(JSON.stringify(version.scope)),
-      priority: version.priority,
-      stackingMode: version.stackingMode,
-      status: version.status,
-      startTime: version.startTime,
-      endTime: version.endTime,
+      name: targetVersion.name,
+      description: targetVersion.description,
+      type: targetVersion.type,
+      config: JSON.parse(JSON.stringify(targetVersion.config)),
+      scope: JSON.parse(JSON.stringify(targetVersion.scope)),
+      priority: targetVersion.priority,
+      stackingMode: targetVersion.stackingMode,
+      status: targetVersion.status,
+      startTime: targetVersion.startTime,
+      endTime: targetVersion.endTime,
+      activeVersion: targetVersion.version,
       updatedAt: Date.now()
     };
 
@@ -288,10 +477,20 @@ class DataStore {
 
     this.createVersion(promotionId, rolledBack, VersionChangeType.ROLLBACK, {
       operatorId: options?.operatorId,
-      changeDescription: `回滚到版本 v${versionNumber}`
+      changeDescription: `回滚到版本 v${versionNumber}`,
+      versionStatus: VersionStatus.EFFECTIVE,
+      parentVersion: versionNumber
     });
 
     return rolledBack;
+  }
+
+  private markVersionStatus(promotionId: string, versionNumber: number, status: VersionStatus): void {
+    const versions = this.versions.get(promotionId) || [];
+    const version = versions.find(v => v.version === versionNumber);
+    if (version) {
+      version.versionStatus = status;
+    }
   }
 
   submitForApproval(
@@ -301,13 +500,20 @@ class DataStore {
     const promotion = this.promotions.get(promotionId);
     if (!promotion) return undefined;
 
+    const currentVersionNum = this.versionCounters.get(promotionId) || 0;
+
     const updated = { ...promotion, status: PromotionStatus.PENDING_APPROVAL, updatedAt: Date.now() };
     this.promotions.set(promotionId, updated);
 
-    this.createVersion(promotionId, updated, VersionChangeType.UPDATE, {
-      operatorId: options?.operatorId,
-      changeDescription: options?.changeDescription || '提交审批'
-    });
+    this.markVersionStatus(promotionId, currentVersionNum, VersionStatus.PENDING_APPROVAL);
+    const currentVersion = this.getVersion(promotionId, currentVersionNum);
+    if (currentVersion) {
+      currentVersion.changeType = VersionChangeType.SUBMIT_FOR_APPROVAL;
+      currentVersion.changeDescription = options?.changeDescription || '提交审批';
+      if (options?.operatorId) {
+        currentVersion.operatorId = options.operatorId;
+      }
+    }
 
     return updated;
   }
@@ -319,14 +525,33 @@ class DataStore {
     const promotion = this.promotions.get(promotionId);
     if (!promotion) return undefined;
 
+    const currentVersionNum = this.versionCounters.get(promotionId) || 0;
+    const currentEffective = this.getEffectiveVersion(promotionId);
+
+    if (currentEffective) {
+      this.markVersionStatus(promotionId, currentEffective.version, VersionStatus.HISTORICAL);
+    }
+
+    this.markVersionStatus(promotionId, currentVersionNum, VersionStatus.EFFECTIVE);
+
     const newStatus = options?.activate ? PromotionStatus.ACTIVE : PromotionStatus.INACTIVE;
-    const updated = { ...promotion, status: newStatus, updatedAt: Date.now() };
+    const updated = {
+      ...promotion,
+      status: newStatus,
+      activeVersion: currentVersionNum,
+      updatedAt: Date.now()
+    };
     this.promotions.set(promotionId, updated);
 
-    this.createVersion(promotionId, updated, VersionChangeType.APPROVE, {
-      operatorId: options?.operatorId,
-      changeDescription: options?.changeDescription || `审批通过${options?.activate ? '并上线' : ''}`
-    });
+    const currentVersion = this.getVersion(promotionId, currentVersionNum);
+    if (currentVersion) {
+      currentVersion.changeType = VersionChangeType.APPROVE;
+      currentVersion.changeDescription = options?.changeDescription || `审批通过${options?.activate ? '并上线' : ''}`;
+      if (options?.operatorId) {
+        currentVersion.operatorId = options.operatorId;
+      }
+      currentVersion.status = newStatus;
+    }
 
     return updated;
   }
@@ -338,13 +563,49 @@ class DataStore {
     const promotion = this.promotions.get(promotionId);
     if (!promotion) return undefined;
 
-    const updated = { ...promotion, status: PromotionStatus.DRAFT, updatedAt: Date.now() };
+    const currentVersionNum = this.versionCounters.get(promotionId) || 0;
+
+    this.markVersionStatus(promotionId, currentVersionNum, VersionStatus.REJECTED);
+
+    const effectiveVersion = this.getEffectiveVersion(promotionId);
+    let draftStatus = PromotionStatus.DRAFT;
+    let draftConfig = promotion.config;
+    let draftScope = promotion.scope;
+
+    if (effectiveVersion) {
+      draftStatus = effectiveVersion.status;
+      draftConfig = JSON.parse(JSON.stringify(effectiveVersion.config));
+      draftScope = JSON.parse(JSON.stringify(effectiveVersion.scope));
+    }
+
+    const updated = {
+      ...promotion,
+      status: draftStatus,
+      config: draftConfig,
+      scope: draftScope,
+      updatedAt: Date.now()
+    };
+
+    if (effectiveVersion) {
+      updated.name = effectiveVersion.name;
+      updated.description = effectiveVersion.description;
+      updated.type = effectiveVersion.type;
+      updated.priority = effectiveVersion.priority;
+      updated.stackingMode = effectiveVersion.stackingMode;
+      updated.startTime = effectiveVersion.startTime;
+      updated.endTime = effectiveVersion.endTime;
+    }
+
     this.promotions.set(promotionId, updated);
 
-    this.createVersion(promotionId, updated, VersionChangeType.REJECT, {
-      operatorId: options?.operatorId,
-      changeDescription: options?.rejectReason || '审批被驳回'
-    });
+    const currentVersion = this.getVersion(promotionId, currentVersionNum);
+    if (currentVersion) {
+      currentVersion.changeType = VersionChangeType.REJECT;
+      currentVersion.changeDescription = options?.rejectReason || '审批被驳回';
+      if (options?.operatorId) {
+        currentVersion.operatorId = options.operatorId;
+      }
+    }
 
     return updated;
   }

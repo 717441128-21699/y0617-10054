@@ -26,7 +26,16 @@ export enum VersionChangeType {
   REJECT = 'reject',
   ROLLBACK = 'rollback',
   ACTIVATE = 'activate',
-  DEACTIVATE = 'deactivate'
+  DEACTIVATE = 'deactivate',
+  SUBMIT_FOR_APPROVAL = 'submit_for_approval'
+}
+
+export enum VersionStatus {
+  DRAFT = 'draft',
+  PENDING_APPROVAL = 'pending_approval',
+  EFFECTIVE = 'effective',
+  HISTORICAL = 'historical',
+  REJECTED = 'rejected'
 }
 
 export enum StackingMode {
@@ -82,6 +91,8 @@ export interface Promotion {
   endTime: number;
   createdAt: number;
   updatedAt: number;
+  operatorId?: string;
+  activeVersion?: number;
 }
 
 export interface Product {
@@ -169,6 +180,8 @@ export interface PromotionVersion {
   changeType: VersionChangeType;
   changeDescription?: string;
   operatorId?: string;
+  versionStatus: VersionStatus;
+  parentVersion?: number;
   createdAt: number;
 }
 
@@ -223,4 +236,43 @@ export interface ScenarioPreviewResult {
     reason: string;
   }>;
   giftItems: GiftItem[];
+  userTags?: string[];
+  tagImpact?: {
+    matchedTags: string[];
+    unmatchedTags: string[];
+    description: string;
+  };
+}
+
+export interface DashboardFilter {
+  promotionType?: PromotionType;
+  categoryId?: string;
+  operatorId?: string;
+  startTime?: number;
+  endTime?: number;
+  status?: PromotionStatus[];
+}
+
+export interface PromotionEffectAnalysis {
+  totalOrders: number;
+  totalSales: number;
+  totalDiscount: number;
+  promotionCount: number;
+  flashSaleRemainingStock?: number;
+  flashSaleTotalStock?: number;
+  promotionStats: SalesStats[];
+  trendData?: Array<{
+    timestamp: number;
+    orderCount: number;
+    salesAmount: number;
+    discountAmount: number;
+  }>;
+}
+
+export interface SubmitApprovalResult {
+  success: boolean;
+  promotion?: Promotion;
+  conflictResult?: ConflictDetectionResult;
+  hasBlockingConflicts?: boolean;
+  warnings?: string[];
 }
