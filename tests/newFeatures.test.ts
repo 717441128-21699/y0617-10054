@@ -324,7 +324,8 @@ describe('New Features & Bug Fixes', () => {
           startTime: now,
           endTime: now + 86400000
         },
-        autoActivate: true
+        autoActivate: true,
+        skipApproval: true
       });
 
       expect(promotion.status).toBe(PromotionStatus.ACTIVE);

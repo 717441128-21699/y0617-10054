@@ -13,9 +13,20 @@ export enum ScopeType {
 
 export enum PromotionStatus {
   DRAFT = 'draft',
+  PENDING_APPROVAL = 'pending_approval',
   ACTIVE = 'active',
   INACTIVE = 'inactive',
   EXPIRED = 'expired'
+}
+
+export enum VersionChangeType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  APPROVE = 'approve',
+  REJECT = 'reject',
+  ROLLBACK = 'rollback',
+  ACTIVATE = 'activate',
+  DEACTIVATE = 'deactivate'
 }
 
 export enum StackingMode {
@@ -139,4 +150,77 @@ export interface SalesStats {
   totalSales: number;
   totalDiscount: number;
   flashSaleSold?: number;
+}
+
+export interface PromotionVersion {
+  id: string;
+  promotionId: string;
+  version: number;
+  name: string;
+  description: string;
+  type: PromotionType;
+  config: PromotionConfig;
+  scope: PromotionScope;
+  priority: number;
+  stackingMode: StackingMode;
+  status: PromotionStatus;
+  startTime: number;
+  endTime: number;
+  changeType: VersionChangeType;
+  changeDescription?: string;
+  operatorId?: string;
+  createdAt: number;
+}
+
+export interface PromotionVersionDiff {
+  field: string;
+  oldValue: any;
+  newValue: any;
+}
+
+export interface ConflictInfo {
+  type: 'time' | 'scope' | 'stacking' | 'priority';
+  level: 'warning' | 'error';
+  description: string;
+  conflictingPromotionId: string;
+  conflictingPromotionName: string;
+  affectedProductCount?: number;
+  estimatedDiscountDiff?: number;
+}
+
+export interface ConflictDetectionResult {
+  hasConflicts: boolean;
+  conflicts: ConflictInfo[];
+  warnings: string[];
+}
+
+export interface BatchPreviewCartItem {
+  productId: string;
+  quantity: number;
+}
+
+export interface BatchPreviewRequest {
+  scenarios: Array<{
+    scenarioId: string;
+    scenarioName?: string;
+    cartItems: BatchPreviewCartItem[];
+    userTags?: string[];
+  }>;
+  promotionToTest?: Partial<Promotion> & { config: PromotionConfig; scope: PromotionScope };
+  includeExistingPromotions?: boolean;
+}
+
+export interface ScenarioPreviewResult {
+  scenarioId: string;
+  scenarioName?: string;
+  originalTotal: number;
+  finalTotal: number;
+  totalDiscount: number;
+  appliedPromotions: AppliedPromotion[];
+  skippedPromotions: Array<{
+    promotionId: string;
+    promotionName: string;
+    reason: string;
+  }>;
+  giftItems: GiftItem[];
 }

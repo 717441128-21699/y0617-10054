@@ -111,11 +111,48 @@ class SeckillQueue {
 
     this.recordUserPurchase(userId, promotionId, quantity);
 
+    const order = this.createSeckillOrder(userId, promotion, quantity);
+
     return {
       success: true,
       message: '抢购成功',
-      stock: updatedStock
+      stock: updatedStock,
+      orderId: order.id
     };
+  }
+
+  private createSeckillOrder(userId: string, promotion: any, quantity: any) {
+    const product = dataStore.getProduct(promotion.config.productId);
+    if (!product) {
+      throw new Error('商品不存在');
+    }
+
+    const salePrice = promotion.config.salePrice;
+    const originalPrice = product.price;
+    const discountAmount = (originalPrice - salePrice) * quantity;
+
+    const order = dataStore.addOrder({
+      userId,
+      items: [{
+        productId: product.id,
+        quantity,
+        unitPrice: originalPrice,
+        product
+      }],
+      originalTotal: originalPrice * quantity,
+      finalTotal: salePrice * quantity,
+      appliedPromotions: [{
+        promotionId: promotion.id,
+        promotionName: promotion.name,
+        type: promotion.type,
+        discountAmount,
+        description: `限时秒杀价${salePrice}元`
+      }],
+      giftItems: [],
+      status: 'paid'
+    });
+
+    return order;
   }
 
   private getUserPurchasedQuantity(userId: string, promotionId: string): number {

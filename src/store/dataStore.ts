@@ -5,7 +5,9 @@ import {
   FlashSaleStock,
   Order,
   SalesStats,
-  PromotionStatus
+  PromotionStatus,
+  PromotionVersion,
+  VersionChangeType
 } from '../types';
 
 class DataStore {
@@ -13,6 +15,8 @@ class DataStore {
   private promotions: Map<string, Promotion> = new Map();
   private flashSaleStocks: Map<string, FlashSaleStock> = new Map();
   private orders: Order[] = [];
+  private versions: Map<string, PromotionVersion[]> = new Map();
+  private versionCounters: Map<string, number> = new Map();
 
   generateId(): string {
     return uuidv4();
@@ -45,7 +49,10 @@ class DataStore {
     return updated;
   }
 
-  addPromotion(promotion: Omit<Promotion, 'id' | 'createdAt' | 'updatedAt'>): Promotion {
+  addPromotion(
+    promotion: Omit<Promotion, 'id' | 'createdAt' | 'updatedAt'>,
+    options?: { operatorId?: string; changeDescription?: string }
+  ): Promotion {
     const id = this.generateId();
     const now = Date.now();
     const newPromotion: Promotion = {
@@ -67,6 +74,11 @@ class DataStore {
       });
     }
 
+    this.createVersion(id, newPromotion, VersionChangeType.CREATE, {
+      operatorId: options?.operatorId,
+      changeDescription: options?.changeDescription || '创建活动'
+    });
+
     return newPromotion;
   }
 
@@ -86,15 +98,28 @@ class DataStore {
     );
   }
 
-  updatePromotion(id: string, updates: Partial<Promotion>): Promotion | undefined {
+  updatePromotion(
+    id: string,
+    updates: Partial<Promotion>,
+    options?: { operatorId?: string; changeDescription?: string }
+  ): Promotion | undefined {
     const promotion = this.promotions.get(id);
     if (!promotion) return undefined;
     const updated = { ...promotion, ...updates, updatedAt: Date.now() };
     this.promotions.set(id, updated);
+
+    this.createVersion(id, updated, VersionChangeType.UPDATE, {
+      operatorId: options?.operatorId,
+      changeDescription: options?.changeDescription || '更新活动'
+    });
+
     return updated;
   }
 
   deletePromotion(id: string): boolean {
+    this.versions.delete(id);
+    this.versionCounters.delete(id);
+    this.flashSaleStocks.delete(id);
     return this.promotions.delete(id);
   }
 
@@ -121,15 +146,27 @@ class DataStore {
     return newOrder;
   }
 
-  getOrdersByPromotion(promotionId: string): Order[] {
-    return this.orders.filter(o =>
+  getOrdersByPromotion(promotionId: string, timeRange?: { startTime?: number; endTime?: number }): Order[] {
+    let orders = this.orders.filter(o =>
       o.appliedPromotions.some(p => p.promotionId === promotionId)
     );
+
+    if (timeRange) {
+      if (timeRange.startTime !== undefined) {
+        orders = orders.filter(o => o.createdAt >= timeRange.startTime!);
+      }
+      if (timeRange.endTime !== undefined) {
+        orders = orders.filter(o => o.createdAt <= timeRange.endTime!);
+      }
+    }
+
+    return orders;
   }
 
-  getSalesStats(promotionId: string): SalesStats {
-    const orders = this.getOrdersByPromotion(promotionId);
+  getSalesStats(promotionId: string, timeRange?: { startTime?: number; endTime?: number }): SalesStats {
+    const orders = this.getOrdersByPromotion(promotionId, timeRange);
     const promotion = this.getPromotion(promotionId);
+    const flashSaleStock = this.getFlashSaleStock(promotionId);
 
     let totalSales = 0;
     let totalDiscount = 0;
@@ -141,15 +178,11 @@ class DataStore {
       if (promo) {
         totalDiscount += promo.discountAmount;
       }
-      if (promotion?.type === 'flash_sale') {
-        order.items.forEach(item => {
-          if (promotion && 'productId' in promotion.config &&
-              item.productId === (promotion.config as any).productId) {
-            flashSaleSold += item.quantity;
-          }
-        });
-      }
     });
+
+    if (flashSaleStock) {
+      flashSaleSold = flashSaleStock.soldStock;
+    }
 
     const stats: SalesStats = {
       promotionId,
@@ -165,8 +198,155 @@ class DataStore {
     return stats;
   }
 
-  getAllOrders(): Order[] {
-    return [...this.orders];
+  getAllOrders(timeRange?: { startTime?: number; endTime?: number }): Order[] {
+    let orders = [...this.orders];
+    if (timeRange) {
+      if (timeRange.startTime !== undefined) {
+        orders = orders.filter(o => o.createdAt >= timeRange.startTime!);
+      }
+      if (timeRange.endTime !== undefined) {
+        orders = orders.filter(o => o.createdAt <= timeRange.endTime!);
+      }
+    }
+    return orders;
+  }
+
+  private createVersion(
+    promotionId: string,
+    promotion: Promotion,
+    changeType: VersionChangeType,
+    options?: { operatorId?: string; changeDescription?: string }
+  ): PromotionVersion {
+    const versionNum = (this.versionCounters.get(promotionId) || 0) + 1;
+    this.versionCounters.set(promotionId, versionNum);
+
+    const version: PromotionVersion = {
+      id: this.generateId(),
+      promotionId,
+      version: versionNum,
+      name: promotion.name,
+      description: promotion.description,
+      type: promotion.type,
+      config: JSON.parse(JSON.stringify(promotion.config)),
+      scope: JSON.parse(JSON.stringify(promotion.scope)),
+      priority: promotion.priority,
+      stackingMode: promotion.stackingMode,
+      status: promotion.status,
+      startTime: promotion.startTime,
+      endTime: promotion.endTime,
+      changeType,
+      changeDescription: options?.changeDescription,
+      operatorId: options?.operatorId,
+      createdAt: Date.now()
+    };
+
+    if (!this.versions.has(promotionId)) {
+      this.versions.set(promotionId, []);
+    }
+    this.versions.get(promotionId)!.push(version);
+
+    return version;
+  }
+
+  getVersions(promotionId: string): PromotionVersion[] {
+    const versions = this.versions.get(promotionId) || [];
+    return [...versions].sort((a, b) => b.version - a.version);
+  }
+
+  getVersion(promotionId: string, versionNumber: number): PromotionVersion | undefined {
+    const versions = this.versions.get(promotionId) || [];
+    return versions.find(v => v.version === versionNumber);
+  }
+
+  rollbackToVersion(
+    promotionId: string,
+    versionNumber: number,
+    options?: { operatorId?: string }
+  ): Promotion | undefined {
+    const version = this.getVersion(promotionId, versionNumber);
+    if (!version) return undefined;
+
+    const promotion = this.promotions.get(promotionId);
+    if (!promotion) return undefined;
+
+    const rolledBack: Promotion = {
+      ...promotion,
+      name: version.name,
+      description: version.description,
+      type: version.type,
+      config: JSON.parse(JSON.stringify(version.config)),
+      scope: JSON.parse(JSON.stringify(version.scope)),
+      priority: version.priority,
+      stackingMode: version.stackingMode,
+      status: version.status,
+      startTime: version.startTime,
+      endTime: version.endTime,
+      updatedAt: Date.now()
+    };
+
+    this.promotions.set(promotionId, rolledBack);
+
+    this.createVersion(promotionId, rolledBack, VersionChangeType.ROLLBACK, {
+      operatorId: options?.operatorId,
+      changeDescription: `回滚到版本 v${versionNumber}`
+    });
+
+    return rolledBack;
+  }
+
+  submitForApproval(
+    promotionId: string,
+    options?: { operatorId?: string; changeDescription?: string }
+  ): Promotion | undefined {
+    const promotion = this.promotions.get(promotionId);
+    if (!promotion) return undefined;
+
+    const updated = { ...promotion, status: PromotionStatus.PENDING_APPROVAL, updatedAt: Date.now() };
+    this.promotions.set(promotionId, updated);
+
+    this.createVersion(promotionId, updated, VersionChangeType.UPDATE, {
+      operatorId: options?.operatorId,
+      changeDescription: options?.changeDescription || '提交审批'
+    });
+
+    return updated;
+  }
+
+  approvePromotion(
+    promotionId: string,
+    options?: { operatorId?: string; changeDescription?: string; activate?: boolean }
+  ): Promotion | undefined {
+    const promotion = this.promotions.get(promotionId);
+    if (!promotion) return undefined;
+
+    const newStatus = options?.activate ? PromotionStatus.ACTIVE : PromotionStatus.INACTIVE;
+    const updated = { ...promotion, status: newStatus, updatedAt: Date.now() };
+    this.promotions.set(promotionId, updated);
+
+    this.createVersion(promotionId, updated, VersionChangeType.APPROVE, {
+      operatorId: options?.operatorId,
+      changeDescription: options?.changeDescription || `审批通过${options?.activate ? '并上线' : ''}`
+    });
+
+    return updated;
+  }
+
+  rejectPromotion(
+    promotionId: string,
+    options?: { operatorId?: string; rejectReason?: string }
+  ): Promotion | undefined {
+    const promotion = this.promotions.get(promotionId);
+    if (!promotion) return undefined;
+
+    const updated = { ...promotion, status: PromotionStatus.DRAFT, updatedAt: Date.now() };
+    this.promotions.set(promotionId, updated);
+
+    this.createVersion(promotionId, updated, VersionChangeType.REJECT, {
+      operatorId: options?.operatorId,
+      changeDescription: options?.rejectReason || '审批被驳回'
+    });
+
+    return updated;
   }
 }
 
