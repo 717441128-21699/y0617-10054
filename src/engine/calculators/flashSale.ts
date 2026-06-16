@@ -13,6 +13,18 @@ export class FlashSaleCalculator implements PromotionCalculator {
     description: string;
     applicableItems: CartItem[];
   } | null {
+    return null;
+  }
+
+  static calculatePreview(
+    promotion: Promotion,
+    items: CartItem[]
+  ): {
+    discountAmount: number;
+    giftItems: GiftItem[];
+    description: string;
+    applicableItems: CartItem[];
+  } | null {
     const config = promotion.config as FlashSaleConfig;
 
     const applicableItems = items.filter(item =>
@@ -25,7 +37,7 @@ export class FlashSaleCalculator implements PromotionCalculator {
     const flashSaleStock = dataStore.getFlashSaleStock(promotion.id);
     const availableStock = flashSaleStock
       ? flashSaleStock.totalStock - flashSaleStock.soldStock - flashSaleStock.lockedStock
-      : 0;
+      : config.stock;
 
     if (availableStock <= 0) return null;
 
@@ -41,7 +53,7 @@ export class FlashSaleCalculator implements PromotionCalculator {
     return {
       discountAmount,
       giftItems: [],
-      description: `限时秒杀价${config.salePrice}元，省${discountAmount.toFixed(2)}元（限购${limitedQuantity}件）`,
+      description: `限时秒杀价${config.salePrice}元，省${discountAmount.toFixed(2)}元（限购${limitedQuantity}件，需通过秒杀入口抢购）`,
       applicableItems
     };
   }

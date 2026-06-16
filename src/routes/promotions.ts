@@ -4,10 +4,68 @@ import { PromotionStatus } from '../types';
 
 const router = Router();
 
+router.get('/stats/all', (_req: Request, res: Response) => {
+  const stats = promotionService.getAllSalesStats();
+  res.json({ data: stats });
+});
+
+router.get('/stats/overview', (_req: Request, res: Response) => {
+  const overview = promotionService.getStatsOverview();
+  res.json({ data: overview });
+});
+
 router.get('/', (req: Request, res: Response) => {
   const status = req.query.status as PromotionStatus | undefined;
   const promotions = promotionService.getAllPromotions(status);
   res.json({ data: promotions });
+});
+
+router.post('/preview', (req: Request, res: Response) => {
+  try {
+    const { promotion, cartItems } = req.body;
+    if (!promotion || !cartItems) {
+      res.status(400).json({ error: '缺少必要参数：promotion 和 cartItems' });
+      return;
+    }
+    const result = promotionService.previewPromotion(promotion, cartItems);
+    res.json({ data: result });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '预览失败' });
+  }
+});
+
+router.post('/wizard/submit', (req: Request, res: Response) => {
+  try {
+    const { basicInfo, scope, config, stacking, schedule, autoActivate } = req.body;
+
+    if (!basicInfo || !scope || !config || !schedule) {
+      res.status(400).json({ error: '缺少必要的向导步骤数据' });
+      return;
+    }
+
+    const promotion = promotionService.createFromWizard({
+      basicInfo,
+      scope,
+      config,
+      stacking,
+      schedule,
+      autoActivate: autoActivate || false
+    });
+
+    res.status(201).json({ data: promotion });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '创建失败' });
+  }
+});
+
+router.get('/:id/stats', (req: Request, res: Response) => {
+  const promotion = promotionService.getPromotion(req.params.id);
+  if (!promotion) {
+    res.status(404).json({ error: '活动不存在' });
+    return;
+  }
+  const stats = promotionService.getSalesStats(req.params.id);
+  res.json({ data: stats });
 });
 
 router.get('/:id', (req: Request, res: Response) => {
@@ -90,21 +148,6 @@ router.post('/:id/deactivate', (req: Request, res: Response) => {
     return;
   }
   res.json({ data: updated });
-});
-
-router.get('/:id/stats', (req: Request, res: Response) => {
-  const promotion = promotionService.getPromotion(req.params.id);
-  if (!promotion) {
-    res.status(404).json({ error: '活动不存在' });
-    return;
-  }
-  const stats = promotionService.getSalesStats(req.params.id);
-  res.json({ data: stats });
-});
-
-router.get('/stats/all', (_req: Request, res: Response) => {
-  const stats = promotionService.getAllSalesStats();
-  res.json({ data: stats });
 });
 
 export default router;

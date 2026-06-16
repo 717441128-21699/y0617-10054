@@ -1,5 +1,5 @@
 import { dataStore } from '../store/dataStore';
-import { FlashSaleStock } from '../types';
+import { FlashSaleStock, PromotionStatus } from '../types';
 
 export interface SeckillRequest {
   requestId: string;
@@ -70,6 +70,10 @@ class SeckillQueue {
     const promotion = dataStore.getPromotion(promotionId);
     if (!promotion) {
       return { success: false, message: '活动不存在' };
+    }
+
+    if (promotion.status !== PromotionStatus.ACTIVE) {
+      return { success: false, message: '活动已下线' };
     }
 
     const now = Date.now();
